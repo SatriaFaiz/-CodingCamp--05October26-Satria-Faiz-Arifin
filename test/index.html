@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Test Suite — To-Do List Life Dashboard</title>
+
+  <!-- QUnit CSS -->
+  <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.21.0.css" />
+
+  <style>
+    /* Minimal layout tweak so QUnit header doesn't obscure content */
+    body { font-family: sans-serif; }
+    #qunit-fixture {
+      /* QUnit resets this after each test — keep it off-screen */
+      position: absolute;
+      left: -9999px;
+      top: -9999px;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+    }
+  </style>
+</head>
+<body>
+
+  <!--
+    QUnit needs these two elements to render its results UI.
+    The #qunit-fixture div is wiped clean after every test by QUnit itself.
+  -->
+  <div id="qunit"></div>
+  <div id="qunit-fixture">
+    <!--
+      Minimal DOM stubs so the app.js module-level code that touches the DOM
+      (TimerModule._render, TodoModule._render, etc.) does not throw when the
+      modules initialise via DOMContentLoaded.  Only elements actually read or
+      written by the modules are needed.
+    -->
+
+    <!-- Greeting stubs -->
+    <div id="clock"></div>
+    <div id="date"></div>
+    <div id="greeting-text"></div>
+
+    <!-- Timer stubs -->
+    <div id="timer-display">25:00</div>
+    <div id="timer-message" hidden></div>
+    <button id="timer-start">Start</button>
+    <button id="timer-stop" disabled>Stop</button>
+    <button id="timer-reset">Reset</button>
+
+    <!-- Todo stubs -->
+    <input id="todo-input" type="text" />
+    <button id="todo-add-btn">Add</button>
+    <span id="todo-input-error"></span>
+    <ul id="todo-list"></ul>
+
+    <!-- Quick Links stubs -->
+    <input id="link-label-input" type="text" />
+    <input id="link-url-input" type="text" />
+    <button id="link-add-btn">Add Link</button>
+    <span id="link-label-error"></span>
+    <span id="link-url-error"></span>
+    <p id="link-cap-message" hidden>Maximum of 20 links reached.</p>
+    <div id="links-list"></div>
+  </div>
+
+  <!-- QUnit JS -->
+  <script src="https://code.jquery.com/qunit/qunit-2.21.0.js"></script>
+
+  <!-- fast-check -->
+  <script src="https://cdn.jsdelivr.net/npm/fast-check@3.21.0/lib/bundle/fast-check.min.js"></script>
+
+  <!--
+    Load app.js.  It exposes all testable symbols on window.__test
+    and registers the DOMContentLoaded listener.  Because the DOM stubs
+    above are already present when that listener fires, the null-guards
+    in each module will find real (stubbed) elements and not throw.
+  -->
+  <script src="../js/app.js"></script>
+
+  <script>
+    /* =====================================================================
+       Helpers
+       ===================================================================== */
+
+    /**
+     * Shorthand references — resolved AFTER app.js has executed so that
+     * window.__test is fully populated.
+     */
+    var SS  = window.__test.StorageService;
+    var TM  = window.__test.TimerModule;
+    var GG  = window.__test.getGreeting;
+    var FD  = window.__test.formatDate;
+    var TD  = window.__test.TodoModule;
+    var QL  = window.__test.QuickLinksModule;
+    var fc  = window.fc; // fast-check global
+
+    /* =====================================================================
+       MODULE 1: StorageService unit tests
+       Requirements: 6.3, 6.4, 9.3, 9.4
+       ===================================================================== */
+    QUnit.module('StorageService', function (hooks) {
+
+      hooks.beforeEach(function () {
+        // Use a test-specific key so we don't pollute real app data
+        localStorage.removeItem('__test_key__');
+      });
+
+      hooks.afterEach(function () {
+        localStorage.removeItem('__test_key__');
+      });
+
+      QUnit.test('absent key returns null', function (assert) {
+        var result = SS.read('__test_key__');
+        assert.strictEqual(result, null, 'read() on absent key should return null');
+      });
+
+      QUnit.test('corrupt JSON returns null and emits console.warn', function (assert) {
+        localStorage.setItem('__test_key__', '{ not valid json :::');
+        var warnCalled = false;
+        var origWarn = console.warn;
+        console.warn = function () { warnCalled = true; origWarn.apply(console, arguments); };
+
+        var result = SS.read('__test_key__');
+
+        console.warn = origWarn;
+        assert.strictEqual(result, null, 'corrupt JSON should return null');
+        assert.ok(warnCalled, 'console.warn should have been called');
+      });
+
+      QUnit.test('valid JSON round-trips correctly', function (assert) {
+        var data = { foo: 'bar', num: 42, arr: [1, 2, 3] };
+        SS.write('__test_key__', data);
+        var result = SS.read('__test_key__');
+        assert.deepEqual(result, data, 'round-trip should produce identical value');
+      });
+
+      QUnit.test('write() survives a mocked DOMException without throwing', function (assert) {
+        // Mock localStorage.setItem to throw a DOMException
+        var orig = localStorage.setItem.bind(localStorage);
+        localStorage.setItem = function () {
+          throw new DOMException('QuotaExceededError');
+        };
+
+        var threw = false;
+        try {
+          SS.write('__test_key__', { test: true });
+        } catch (e) {
+          threw = true;
+        } finally {
+          localStorage.setItem = orig;
+        }
+
+        assert.strictEqual(threw, false, 'write() should not propagate a DOMException');
+      });
+    });
+
+    /* =====================================================================
+       MODULE 2: getGreeting unit tests
+       Requirements: 1.3, 1.4, 1.5
+       ===================================================================== */
+    QUnit.module('getGreeting', function () {
+
+      QUnit.test('hours 0–4 return "Good Evening"', function (assert) {
+        [0, 1, 2, 3, 4].forEach(function (h) {
+          assert.strictEqual(GG(h), 'Good Evening', 'hour ' + h);
+        });
+      });
+
+      QUnit.test('hours 5–11 return "Good Morning"', function (assert) {
+        [5, 6, 7, 8, 9, 10, 11].forEach(function (h) {
+          assert.strictEqual(GG(h), 'Good Morning', 'hour ' + h);
+        });
+      });
+
+      QUnit.test('hours 12–17 return "Good Afternoon"', function (assert) {
+        [12, 13, 14, 15, 16, 17].forEach(function (h) {
+          assert.strictEqual(GG(h), 'Good Afternoon', 'hour ' + h);
+        });
+      });
+
+      QUnit.test('hours 18–23 return "Good Evening"', function (assert) {
+        [18, 19, 20, 21, 22, 23].forEach(function (h) {
+          assert.strictEqual(GG(h), 'Good Evening', 'hour ' + h);
+        });
+      });
+
+      QUnit.test('boundary hours', function (assert) {
+        assert.strictEqual(GG(5),  'Good Morning',   'boundary: 5  → Good Morning');
+        assert.strictEqual(GG(11), 'Good Morning',   'boundary: 11 → Good Morning');
+        assert.strictEqual(GG(12), 'Good Afternoon', 'boundary: 12 → Good Afternoon');
+        assert.strictEqual(GG(17), 'Good Afternoon', 'boundary: 17 → Good Afternoon');
+        assert.strictEqual(GG(18), 'Good Evening',   'boundary: 18 → Good Evening');
+        assert.strictEqual(GG(23), 'Good Evening',   'boundary: 23 → Good Evening');
+        assert.strictEqual(GG(0),  'Good Evening',   'boundary: 0  → Good Evening');
+        assert.strictEqual(GG(4),  'Good Evening',   'boundary: 4  → Good Evening');
+      });
+    });
+
+    /* =====================================================================
+       MODULE 3: formatDate unit tests
+       Requirement: 1.2
+       ===================================================================== */
+    QUnit.module('formatDate', function () {
+
+      QUnit.test('2025-10-26 formats as "Sunday, 26 October 2025"', function (assert) {
+        var d = new Date(2025, 9, 26); // months are 0-indexed
+        assert.strictEqual(FD(d), 'Sunday, 26 October 2025');
+      });
+
+      QUnit.test('2025-01-01 formats as "Wednesday, 01 January 2025"', function (assert) {
+        var d = new Date(2025, 0, 1);
+        assert.strictEqual(FD(d), 'Wednesday, 01 January 2025');
+      });
+
+      QUnit.test('2024-12-31 formats as "Tuesday, 31 December 2024"', function (assert) {
+        var d = new Date(2024, 11, 31);
+        assert.strictEqual(FD(d), 'Tuesday, 31 December 2024');
+      });
+    });
+
+    /* =====================================================================
+       MODULE 4: TimerModule unit tests
+       Requirements: 2.2, 2.4, 2.5, 2.7, 2.9
+       ===================================================================== */
+    QUnit.module('TimerModule', function (hooks) {
+
+      hooks.beforeEach(function () {
+        // Always start each test from a clean IDLE state
+        TM.reset();
+      });
+
+      hooks.afterEach(function () {
+        // Clean up any running intervals
+        TM.reset();
+      });
+
+      QUnit.test('init() → state is IDLE, remaining is 1500', function (assert) {
+        TM.init();
+        assert.strictEqual(TM._getState(), 'IDLE', 'state should be IDLE after init');
+        assert.strictEqual(TM._getRemaining(), 1500, 'remaining should be 1500 after init');
+      });
+
+      QUnit.test('start() from IDLE → state becomes RUNNING', function (assert) {
+        assert.strictEqual(TM._getState(), 'IDLE', 'precondition: state is IDLE');
+        TM.start();
+        assert.strictEqual(TM._getState(), 'RUNNING', 'state should be RUNNING after start()');
+      });
+
+      QUnit.test('stop() from RUNNING → state becomes PAUSED', function (assert) {
+        TM.start();
+        assert.strictEqual(TM._getState(), 'RUNNING', 'precondition: state is RUNNING');
+        TM.stop();
+        assert.strictEqual(TM._getState(), 'PAUSED', 'state should be PAUSED after stop()');
+      });
+
+      QUnit.test('start() from PAUSED → state becomes RUNNING (resume)', function (assert) {
+        TM.start();
+        TM.stop();
+        assert.strictEqual(TM._getState(), 'PAUSED', 'precondition: state is PAUSED');
+        TM.start();
+        assert.strictEqual(TM._getState(), 'RUNNING', 'state should be RUNNING after resume');
+      });
+
+      QUnit.test('start() from RUNNING is a no-op (state stays RUNNING)', function (assert) {
+        TM.start();
+        assert.strictEqual(TM._getState(), 'RUNNING', 'precondition: state is RUNNING');
+        TM.start(); // second call
+        assert.strictEqual(TM._getState(), 'RUNNING', 'state should still be RUNNING');
+        assert.strictEqual(TM._getRemaining(), 1500, 'remaining should be unchanged');
+      });
+
+      QUnit.test('stop() from IDLE is a no-op (state stays IDLE)', function (assert) {
+        assert.strictEqual(TM._getState(), 'IDLE', 'precondition: state is IDLE');
+        TM.stop();
+        assert.strictEqual(TM._getState(), 'IDLE', 'state should still be IDLE after stop() no-op');
+      });
+
+      QUnit.test('reset() from RUNNING → IDLE with remaining = 1500', function (assert) {
+        TM.start();
+        TM.tick(); // advance by 1 s
+        assert.strictEqual(TM._getRemaining(), 1499, 'precondition: 1 tick elapsed');
+        TM.reset();
+        assert.strictEqual(TM._getState(), 'IDLE', 'state should be IDLE after reset');
+        assert.strictEqual(TM._getRemaining(), 1500, 'remaining should be 1500 after reset');
+      });
+
+      QUnit.test('reset() from PAUSED → IDLE with remaining = 1500', function (assert) {
+        TM.start();
+        TM.stop();
+        TM.reset();
+        assert.strictEqual(TM._getState(), 'IDLE', 'state should be IDLE after reset from PAUSED');
+        assert.strictEqual(TM._getRemaining(), 1500, 'remaining should be 1500 after reset');
+      });
+
+      QUnit.test('tick() in DONE state does not decrement below 0', function (assert) {
+        // Drive timer to DONE manually
+        TM.start();
+        // Simulate expiry: call tick() 1500 times
+        for (var i = 0; i < 1500; i++) {
+          TM.tick();
+        }
+        assert.strictEqual(TM._getState(), 'DONE', 'timer should be in DONE state');
+        assert.strictEqual(TM._getRemaining(), 0, 'remaining should be exactly 0');
+        // Extra ticks in DONE state must be no-ops
+        TM.tick();
+        TM.tick();
+        assert.strictEqual(TM._getRemaining(), 0, 'remaining must not go below 0');
+      });
+
+      QUnit.test('multiple start() calls do not create duplicate intervals', function (assert) {
+        // The only way to observe this reliably without a spy framework is to
+        // verify the state machine guards: calling start() while RUNNING is a no-op.
+        TM.start();
+        var remainingBefore = TM._getRemaining();
+        TM.start(); // should be ignored
+        TM.start(); // should be ignored
+        assert.strictEqual(TM._getState(), 'RUNNING', 'state is still RUNNING');
+        // tick() once to confirm only one decrement per call
+        TM.tick();
+        assert.strictEqual(TM._getRemaining(), remainingBefore - 1, 'only one decrement per tick');
+      });
+    });
+
+    /* =====================================================================
+       MODULE 5: TodoModule._validate() unit tests
+       Requirements: 3.3, 3.4, 4.4, 4.5
+       ===================================================================== */
+    QUnit.module('TodoModule._validate', function () {
+
+      QUnit.test('empty string → invalid', function (assert) {
+        var r = TD._validate('');
+        assert.strictEqual(r.valid, false, 'empty string must be invalid');
+        assert.ok(r.error, 'should have an error message');
+      });
+
+      QUnit.test('whitespace-only string "   " → invalid', function (assert) {
+        var r = TD._validate('   ');
+        assert.strictEqual(r.valid, false, 'whitespace-only must be invalid');
+      });
+
+      QUnit.test('whitespace with tabs and newlines → invalid', function (assert) {
+        var r = TD._validate(' \t \n \r ');
+        assert.strictEqual(r.valid, false, 'tab/newline whitespace must be invalid');
+      });
+
+      QUnit.test('exactly 200-char string → valid', function (assert) {
+        var str200 = new Array(201).join('a'); // 200 'a' characters
+        var r = TD._validate(str200);
+        assert.strictEqual(r.valid, true, '200-char string must be valid');
+        assert.strictEqual(r.error, null, 'no error for valid input');
+      });
+
+      QUnit.test('201-char string → invalid', function (assert) {
+        var str201 = new Array(202).join('a'); // 201 'a' characters
+        var r = TD._validate(str201);
+        assert.strictEqual(r.valid, false, '201-char string must be invalid');
+        assert.ok(r.error, 'should have an error message');
+      });
+
+      QUnit.test('normal valid string → valid', function (assert) {
+        var r = TD._validate('Buy milk');
+        assert.strictEqual(r.valid, true, 'normal string must be valid');
+        assert.strictEqual(r.error, null, 'no error for valid input');
+      });
+    });
+
+    /* =====================================================================
+       MODULE 6: QuickLinksModule helper unit tests
+       Requirements: 7.3, 7.4, 7.5
+       ===================================================================== */
+    QUnit.module('QuickLinksModule helpers', function () {
+
+      /* _validateLabel */
+      QUnit.test('_validateLabel: empty string → invalid with correct message', function (assert) {
+        var r = QL._validateLabel('');
+        assert.strictEqual(r.valid, false, 'empty label must be invalid');
+        assert.strictEqual(r.error, 'Label cannot be empty.', 'error message must match spec');
+      });
+
+      QUnit.test('_validateLabel: whitespace-only → invalid', function (assert) {
+        var r = QL._validateLabel('  ');
+        assert.strictEqual(r.valid, false, 'whitespace-only label must be invalid');
+      });
+
+      QUnit.test('_validateLabel: "GitHub" → valid', function (assert) {
+        var r = QL._validateLabel('GitHub');
+        assert.strictEqual(r.valid, true, 'non-empty label must be valid');
+        assert.strictEqual(r.error, null);
+      });
+
+      /* _validateUrl */
+      QUnit.test('_validateUrl: empty string → invalid with correct message', function (assert) {
+        var r = QL._validateUrl('');
+        assert.strictEqual(r.valid, false, 'empty URL must be invalid');
+        assert.strictEqual(r.error, 'URL cannot be empty.', 'error message must match spec');
+      });
+
+      QUnit.test('_validateUrl: whitespace-only → invalid', function (assert) {
+        var r = QL._validateUrl('  ');
+        assert.strictEqual(r.valid, false, 'whitespace-only URL must be invalid');
+      });
+
+      QUnit.test('_validateUrl: bare domain "example.com" → valid (auto-normalised)', function (assert) {
+        var r = QL._validateUrl('example.com');
+        assert.strictEqual(r.valid, true, 'bare domain should be auto-normalised and valid');
+      });
+
+      QUnit.test('_validateUrl: "https://example.com" → valid', function (assert) {
+        var r = QL._validateUrl('https://example.com');
+        assert.strictEqual(r.valid, true, 'https URL must be valid');
+      });
+
+      QUnit.test('_validateUrl: "http://example.com" → valid', function (assert) {
+        var r = QL._validateUrl('http://example.com');
+        assert.strictEqual(r.valid, true, 'http URL must be valid');
+      });
+
+      /* _normaliseUrl */
+      QUnit.test('_normaliseUrl: bare domain gets "https://" prepended', function (assert) {
+        assert.strictEqual(
+          QL._normaliseUrl('example.com'),
+          'https://example.com',
+          'bare domain should become https://example.com'
+        );
+      });
+
+      QUnit.test('_normaliseUrl: "http://example.com" returned unchanged', function (assert) {
+        assert.strictEqual(
+          QL._normaliseUrl('http://example.com'),
+          'http://example.com',
+          'http:// URL must be returned unchanged'
+        );
+      });
+
+      QUnit.test('_normaliseUrl: "https://foo.bar" returned unchanged', function (assert) {
+        assert.strictEqual(
+          QL._normaliseUrl('https://foo.bar'),
+          'https://foo.bar',
+          'https:// URL must be returned unchanged'
+        );
+      });
+    });
+
+    /* =====================================================================
+       PROPERTY-BASED TESTS (fast-check)
+       ===================================================================== */
+
+    /* Helper: wrap a fc.assert call in a QUnit test so failures surface
+       as QUnit assertion failures rather than uncaught errors.            */
+    function propertyTest(testName, thunk) {
+      QUnit.test(testName, function (assert) {
+        try {
+          thunk();
+          assert.ok(true, 'property held for all generated inputs');
+        } catch (e) {
+          assert.ok(false, e.message || String(e));
+        }
+      });
+    }
+
+    QUnit.module('Property-based tests (fast-check)', function (hooks) {
+
+      hooks.afterEach(function () {
+        // Clean up any timer state that property tests may leave behind
+        TM.reset();
+        // Clean up todo/link state
+        TD._setTasks([]);
+        QL._setLinks([]);
+      });
+
+      /* -------------------------------------------------------------------
+         Property 1: Task serialisation round-trip
+         Validates: Requirements 6.5
+         ------------------------------------------------------------------- */
+      propertyTest('Property 1: Task serialisation round-trip', function () {
+        // Feature: todo-life-dashboard, Property 1
+        fc.assert(fc.property(
+          fc.array(fc.record({
+            id:          fc.string(),
+            description: fc.string({ minLength: 1, maxLength: 200 }),
+            completed:   fc.boolean()
+          })),
+          function (tasks) {
+            var json   = JSON.stringify(tasks);
+            var parsed = JSON.parse(json);
+            return tasks.every(function (t, i) {
+              return parsed[i].description === t.description &&
+                     parsed[i].completed   === t.completed;
+            });
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 2: Link serialisation round-trip
+         Validates: Requirements 9.5
+         ------------------------------------------------------------------- */
+      propertyTest('Property 2: Link serialisation round-trip', function () {
+        // Feature: todo-life-dashboard, Property 2
+        fc.assert(fc.property(
+          fc.array(fc.record({
+            id:    fc.string(),
+            label: fc.string({ minLength: 1, maxLength: 50 }),
+            url:   fc.webUrl()
+          })),
+          function (links) {
+            var json   = JSON.stringify(links);
+            var parsed = JSON.parse(json);
+            return links.every(function (l, i) {
+              return parsed[i].label === l.label &&
+                     parsed[i].url   === l.url;
+            });
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 3: Whitespace task descriptions are always rejected
+         Validates: Requirements 3.3, 4.4
+         ------------------------------------------------------------------- */
+      propertyTest('Property 3: Whitespace-only descriptions are always rejected', function () {
+        // Feature: todo-life-dashboard, Property 3
+        fc.assert(fc.property(
+          fc.stringOf(fc.constantFrom(' ', '\t', '\n', '\r')),
+          function (ws) {
+            var result = TD._validate(ws);
+            return result.valid === false;
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 4: Over-length descriptions are always rejected
+         Validates: Requirements 3.4, 4.5
+         ------------------------------------------------------------------- */
+      propertyTest('Property 4: Over-length descriptions are always rejected', function () {
+        // Feature: todo-life-dashboard, Property 4
+        fc.assert(fc.property(
+          fc.string({ minLength: 201 }),
+          function (longStr) {
+            var result = TD._validate(longStr);
+            return result.valid === false;
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 5: URL normalisation idempotence
+         Validates: Requirements 7.5
+         ------------------------------------------------------------------- */
+      propertyTest('Property 5a: webUrl() inputs are returned unchanged by _normaliseUrl', function () {
+        // Feature: todo-life-dashboard, Property 5
+        fc.assert(fc.property(
+          fc.webUrl(),
+          function (url) {
+            var norm = QL._normaliseUrl;
+            return norm(url) === url; // already has http(s) scheme
+          }
+        ));
+      });
+
+      propertyTest('Property 5b: _normaliseUrl is idempotent for arbitrary strings', function () {
+        // Feature: todo-life-dashboard, Property 5
+        fc.assert(fc.property(
+          fc.string(),
+          function (str) {
+            var norm = QL._normaliseUrl;
+            return norm(norm(str)) === norm(str);
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 6: Greeting coverage is total and non-overlapping
+         Validates: Requirements 1.3, 1.4, 1.5
+         ------------------------------------------------------------------- */
+      propertyTest('Property 6: getGreeting covers all 0–23 hours with exactly one valid value', function () {
+        // Feature: todo-life-dashboard, Property 6
+        var valid = ['Good Morning', 'Good Afternoon', 'Good Evening'];
+        fc.assert(fc.property(
+          fc.integer({ min: 0, max: 23 }),
+          function (hour) {
+            var g = GG(hour);
+            return valid.indexOf(g) !== -1;
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 7: Valid task addition grows list by exactly one
+         Validates: Requirements 3.2
+         ------------------------------------------------------------------- */
+      propertyTest('Property 7: Valid addTask() grows list length by exactly one', function () {
+        // Feature: todo-life-dashboard, Property 7
+        var taskArb = fc.record({
+          id:          fc.string(),
+          description: fc.string({ minLength: 1, maxLength: 200 }),
+          completed:   fc.boolean()
+        });
+        fc.assert(fc.property(
+          fc.array(taskArb),
+          fc.string({ minLength: 1, maxLength: 200 }),
+          function (initialTasks, newDesc) {
+            TD._setTasks(initialTasks.slice());
+            var before   = TD._getTasks().length;
+            TD.addTask(newDesc);
+            var tasks    = TD._getTasks();
+            var after    = tasks.length;
+            var lastTask = tasks[after - 1];
+            return after === before + 1 &&
+                   lastTask.description === newDesc.trim() &&
+                   lastTask.completed   === false;
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 8: Task toggle is an involution
+         Validates: Requirements 5.2, 5.3
+         ------------------------------------------------------------------- */
+      propertyTest('Property 8: Toggling a task twice restores its original completed state', function () {
+        // Feature: todo-life-dashboard, Property 8
+        var taskArb2 = fc.record({
+          id:          fc.uuid(),
+          description: fc.string({ minLength: 1, maxLength: 200 }),
+          completed:   fc.boolean()
+        });
+        fc.assert(fc.property(
+          fc.array(taskArb2, { minLength: 1 }),
+          fc.nat(),
+          function (tasks, idx) {
+            var i               = idx % tasks.length;
+            var originalCompleted = tasks[i].completed;
+            var cloned          = tasks.map(function (t) { return Object.assign({}, t); });
+            TD._setTasks(cloned);
+            TD.toggleTask(tasks[i].id);
+            TD.toggleTask(tasks[i].id);
+            var result = TD._getTasks()[i];
+            return result.completed === originalCompleted;
+          }
+        ));
+      });
+
+      /* -------------------------------------------------------------------
+         Property 9: Quick Links cap is enforced under all addition sequences
+         Validates: Requirements 7.8
+         ------------------------------------------------------------------- */
+      propertyTest('Property 9: links collection never exceeds 20 regardless of addition count', function () {
+        // Feature: todo-life-dashboard, Property 9
+        var linkArb = fc.record({
+          label: fc.string({ minLength: 1, maxLength: 50 }),
+          url:   fc.webUrl()
+        });
+        fc.assert(fc.property(
+          fc.array(linkArb, { minLength: 21, maxLength: 50 }),
+          function (links) {
+            QL._setLinks([]);
+            links.forEach(function (l) {
+              QL.addLink(l.label, l.url);
+            });
+            return QL._getLinks().length <= 20;
+          }
+        ));
+      });
+
+    }); // end module: Property-based tests
+
+  </script>
+</body>
+</html>
